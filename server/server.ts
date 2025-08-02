@@ -816,7 +816,7 @@ io.on('connection', (socket: Socket) => {
                 // Check for game over
                 if (game.players[opponentIndex].inPlayCards.every((c) => !c)) {
                     if (game.players[opponentIndex].cards.length === 0) {
-                        // Game over
+                        // Game over - opponent has no cards left at all
                         const winner = clients.get(game.players[playerIndex].id);
                         
                         socket.emit('gameMessage', `You win! Victory achieved!`);
@@ -830,6 +830,23 @@ io.on('connection', (socket: Socket) => {
                         rateLimits.delete(socket.id);
                         rateLimits.delete(game.players[opponentIndex].id);
                         return;
+                    } else {
+                        // Opponent has no cards in play but still has cards to draw
+                        // Force opponent to draw a card if possible
+                        const newCard = game.players[opponentIndex].cards.shift();
+                        if (newCard) {
+                            // Find first empty slot and place the card
+                            for (let i = 0; i < 4; i++) {
+                                if (!game.players[opponentIndex].inPlayCards[i]) {
+                                    game.players[opponentIndex].inPlayCards[i] = newCard;
+                                    break;
+                                }
+                            }
+                            
+                            // Notify players about the forced draw
+                            socket.emit('gameMessage', `Opponent was forced to draw a card!`);
+                            opponentSocket?.emit('gameMessage', `You were forced to draw a card since you had no cards in play!`);
+                        }
                     }
                 }
             }
