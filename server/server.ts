@@ -19,6 +19,58 @@ const sockets = new Map<string, Socket>();
 const queue: string[] = [];
 const games = new Map<string, GameState>();
 
+// Rate limiting for security
+const rateLimits = new Map<string, { lastAction: number; actionCount: number }>();
+const RATE_LIMIT_WINDOW = 1000; // 1 second
+const MAX_ACTIONS_PER_WINDOW = 5;
+
+// Security: Check rate limits
+function checkRateLimit(socketId: string): boolean {
+    const now = Date.now();
+    const limit = rateLimits.get(socketId) || { lastAction: 0, actionCount: 0 };
+    
+    if (now - limit.lastAction > RATE_LIMIT_WINDOW) {
+        // Reset window
+        limit.lastAction = now;
+        limit.actionCount = 1;
+    } else {
+        limit.actionCount++;
+        if (limit.actionCount > MAX_ACTIONS_PER_WINDOW) {
+            return false; // Rate limited
+        }
+    }
+    
+    rateLimits.set(socketId, limit);
+    return true;
+}
+
+// Security: Validate attack input
+function validateAttackInput(detail: any): boolean {
+    if (!detail || typeof detail !== 'object') return false;
+    
+    // Validate attacker index
+    if (typeof detail.attacker !== 'number' || detail.attacker < 0 || detail.attacker > 3) {
+        return false;
+    }
+    
+    // Validate opponent index
+    if (typeof detail.opponent !== 'number' || detail.opponent < 0 || detail.opponent > 3) {
+        return false;
+    }
+    
+    // Validate stat name
+    if (typeof detail.stat !== 'string' || !detail.stat.trim()) {
+        return false;
+    }
+    
+    // Validate lastAttack flag
+    if (typeof detail.lastAttack !== 'boolean') {
+        return false;
+    }
+    
+    return true;
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json()); // Add JSON parsing middleware
@@ -250,24 +302,29 @@ app.get('/api/leaderboard', async (req, res) => {
 // Helper: Verify Supabase JWT and get user profile
 async function verifyToken(token: string) {
     try {
-        const payload = jwt.decode(token) as { sub: string; email: string };
-        console.log('Decoded JWT payload:', payload);
-        if (!payload?.sub) {
-            console.log('JWT missing sub field');
+        // SECURITY FIX: Properly verify JWT signature with Supabase
+        const { data: { user }, error } = await supabase.auth.getUser(token);
+        
+        if (error || !user) {
+            console.log('JWT verification failed:', error);
             return null;
         }
-        const { data, error } = await supabase
+        
+        // Get profile data
+        const { data: profile, error: profileError } = await supabase
             .from('profiles')
             .select('*')
-            .eq('id', payload.sub)
+            .eq('id', user.id)
             .single();
-        if (error || !data) {
-            console.log('Supabase profile lookup failed:', error);
+            
+        if (profileError || !profile) {
+            console.log('Profile lookup failed:', profileError);
             return null;
         }
-        return data;
+        
+        return profile;
     } catch (err) {
-        console.log('JWT decode error:', err);
+        console.log('JWT verification error:', err);
         return null;
     }
 }
@@ -357,6 +414,7 @@ io.on('connection', (socket: Socket) => {
         console.log('Backend: Client disconnected:', socket.id);
         clients.delete(socket.id);
         sockets.delete(socket.id);
+        rateLimits.delete(socket.id); // Clean up rate limits
         const idx = queue.indexOf(socket.id);
         if (idx !== -1) queue.splice(idx, 1);
     });
@@ -385,53 +443,117 @@ io.on('connection', (socket: Socket) => {
     };
 
     socket.on('attack', async ({ gameId, detail }) => {
-        const game = games.get(gameId);
-        if (!game) return;
-        const playerIndex = game.players.findIndex((p) => p.id === socket.id);
-        if (playerIndex === -1 || playerIndex !== game.currentTurn) return;
-        const opponentIndex = 1 - playerIndex;
-        const attacker = game.players[playerIndex].inPlayCards[detail.attacker];
-        const defender = game.players[opponentIndex].inPlayCards[detail.opponent];
-        if (!attacker || !defender) return;
-        const attackerStat = strains[attacker.index][detail.stat];
-        defender.hp -= attackerStat;
-        const isKilled = defender.hp <= 0;
-        if (isKilled) defender.hp = 0;
-        game.players[playerIndex].inPlayCards[detail.attacker] = attacker;
-        game.players[opponentIndex].inPlayCards[detail.opponent] = defender;
-        socket.emit('attack', { yourIndex: detail.attacker, theirIndex: detail.opponent, kill: isKilled });
-        const opponentSocket = sockets.get(game.players[opponentIndex].id);
-        opponentSocket?.emit('attack', { yourIndex: detail.opponent, theirIndex: detail.attacker, kill: isKilled });
-        if (isKilled) {
-            delete game.players[opponentIndex].inPlayCards[detail.opponent];
-            game.players[opponentIndex].deadCards.push(defender);
-            if (game.players[opponentIndex].inPlayCards.every((c) => !c)) {
-                if (game.players[opponentIndex].cards.length === 0) {
-                    // Game over - XP/level updates now handled by secure API
-                    const winner = clients.get(game.players[playerIndex].id);
-                    const loser = clients.get(game.players[opponentIndex].id);
-                    
-                    // Send game over messages
-                    socket.emit('gameMessage', `You win! Victory achieved!`);
-                    socket.emit('gameOver', { winner: winner?.username });
-                    
-                    opponentSocket?.emit('gameMessage', `You lose! Better luck next time!`);
-                    opponentSocket?.emit('gameOver', { winner: winner?.username });
-                    
-                    // Clean up game
-                    games.delete(gameId);
-                    return;
+        try {
+            // SECURITY: Rate limiting
+            if (!checkRateLimit(socket.id)) {
+                console.log(`Rate limit exceeded for ${socket.id}`);
+                socket.emit('error', 'Too many actions. Please slow down.');
+                return;
+            }
+            
+            // SECURITY: Input validation
+            if (!validateAttackInput(detail)) {
+                console.log(`Invalid attack input from ${socket.id}:`, detail);
+                socket.emit('error', 'Invalid attack data');
+                return;
+            }
+            
+            // SECURITY: Validate game exists
+            const game = games.get(gameId);
+            if (!game) {
+                console.log(`Game not found: ${gameId}`);
+                return;
+            }
+            
+            // SECURITY: Validate player and turn
+            const playerIndex = game.players.findIndex((p) => p.id === socket.id);
+            if (playerIndex === -1 || playerIndex !== game.currentTurn) {
+                console.log(`Invalid turn for ${socket.id}`);
+                return;
+            }
+            
+            const opponentIndex = 1 - playerIndex;
+            
+            // SECURITY: Validate cards exist
+            const attacker = game.players[playerIndex].inPlayCards[detail.attacker];
+            const defender = game.players[opponentIndex].inPlayCards[detail.opponent];
+            if (!attacker || !defender) {
+                console.log(`Invalid cards for attack from ${socket.id}`);
+                return;
+            }
+            
+            // SECURITY: Validate attacker card index and stat
+            if (!attacker.index || attacker.index < 0 || attacker.index >= strains.length) {
+                console.log(`Invalid attacker card index: ${attacker.index}`);
+                return;
+            }
+            
+            const strain = strains[attacker.index];
+            if (!strain || !strain[detail.stat] || typeof strain[detail.stat] !== 'number') {
+                console.log(`Invalid stat ${detail.stat} for strain ${attacker.index}`);
+                return;
+            }
+            
+            // SECURITY: Validate defender is alive
+            if (defender.hp <= 0) {
+                console.log(`Attacking dead card from ${socket.id}`);
+                return;
+            }
+            
+            // Process attack
+            const attackerStat = strain[detail.stat];
+            defender.hp -= attackerStat;
+            const isKilled = defender.hp <= 0;
+            if (isKilled) defender.hp = 0;
+            
+            // Update game state
+            game.players[playerIndex].inPlayCards[detail.attacker] = attacker;
+            game.players[opponentIndex].inPlayCards[detail.opponent] = defender;
+            
+            // Send attack events
+            socket.emit('attack', { yourIndex: detail.attacker, theirIndex: detail.opponent, kill: isKilled });
+            const opponentSocket = sockets.get(game.players[opponentIndex].id);
+            opponentSocket?.emit('attack', { yourIndex: detail.opponent, theirIndex: detail.attacker, kill: isKilled });
+            
+            // Handle death
+            if (isKilled) {
+                delete game.players[opponentIndex].inPlayCards[detail.opponent];
+                game.players[opponentIndex].deadCards.push(defender);
+                
+                // Check for game over
+                if (game.players[opponentIndex].inPlayCards.every((c) => !c)) {
+                    if (game.players[opponentIndex].cards.length === 0) {
+                        // Game over
+                        const winner = clients.get(game.players[playerIndex].id);
+                        
+                        socket.emit('gameMessage', `You win! Victory achieved!`);
+                        socket.emit('gameOver', { winner: winner?.username });
+                        
+                        opponentSocket?.emit('gameMessage', `You lose! Better luck next time!`);
+                        opponentSocket?.emit('gameOver', { winner: winner?.username });
+                        
+                        // Clean up
+                        games.delete(gameId);
+                        rateLimits.delete(socket.id);
+                        rateLimits.delete(game.players[opponentIndex].id);
+                        return;
+                    }
                 }
             }
+            
+            // Only switch turns if this is the last attack
+            if (detail.lastAttack) {
+                game.currentTurn = opponentIndex;
+            }
+            
+            // Sync game state
+            socket.emit('syncState', game);
+            opponentSocket?.emit('syncState', game);
+            
+        } catch (error) {
+            console.error(`Attack error for ${socket.id}:`, error);
+            socket.emit('error', 'Attack failed');
         }
-        
-        // Only switch turns if this is the last attack
-        if (detail.lastAttack) {
-            game.currentTurn = opponentIndex;
-        }
-        
-        socket.emit('syncState', game);
-        opponentSocket?.emit('syncState', game);
     });
 
     socket.on('makeMove', ({ gameId, detail }) => {
