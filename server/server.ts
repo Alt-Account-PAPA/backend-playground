@@ -9,6 +9,92 @@ import { strains } from '../src/lib/config';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
+// Attack type determination
+type AttackType = 'fire' | 'ice' | 'arcane' | 'dark';
+
+function getAttackType(cardIndex: number, stat: string): AttackType {
+    const card = strains[cardIndex];
+    if (!card) return 'ice';
+    
+    const ability = card.Abliity?.toLowerCase() || '';
+    const description = card.Description?.toLowerCase() || '';
+    const strain = card.Strain?.toLowerCase() || '';
+    
+    // Fire type
+    if (
+        ability.includes('fire') ||
+        ability.includes('inferno') ||
+        ability.includes('flame') ||
+        description.includes('fire') ||
+        description.includes('inferno') ||
+        strain.includes('red') ||
+        strain.includes('cheetos') ||
+        strain.includes('ak-47')
+    ) {
+        return 'fire';
+    }
+    
+    // Ice type
+    if (
+        ability.includes('frost') ||
+        ability.includes('ice') ||
+        ability.includes('chill') ||
+        description.includes('frost') ||
+        description.includes('ice') ||
+        description.includes('icy') ||
+        strain.includes('gelato') ||
+        strain.includes('mint')
+    ) {
+        return 'ice';
+    }
+    
+    // Dark type
+    if (
+        ability.includes('dark') ||
+        ability.includes('toxic') ||
+        ability.includes('venom') ||
+        ability.includes('rotten') ||
+        description.includes('dark') ||
+        description.includes('toxic') ||
+        description.includes('venom') ||
+        description.includes('noxious') ||
+        strain.includes('venom') ||
+        strain.includes('skunk') ||
+        strain.includes('oreoz')
+    ) {
+        return 'dark';
+    }
+    
+    // Arcane type
+    if (
+        ability.includes('celestial') ||
+        ability.includes('space') ||
+        ability.includes('cosmic') ||
+        ability.includes('lunar') ||
+        ability.includes('dismiss') ||
+        ability.includes('sunborn') ||
+        description.includes('celestial') ||
+        description.includes('space') ||
+        description.includes('cosmic') ||
+        description.includes('galaxy') ||
+        strain.includes('alien') ||
+        strain.includes('divine') ||
+        strain.includes('star') ||
+        strain.includes('moon') ||
+        strain.includes('malawi')
+    ) {
+        return 'arcane';
+    }
+    
+    // Default based on card class
+    switch (card.Class) {
+        case 'Legendary': return 'arcane';
+        case 'Epic': return 'fire';
+        case 'Ultra Rare': return 'dark';
+        default: return 'ice';
+    }
+}
+
 // Supabase setup
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -18,6 +104,17 @@ const clients = new Map<string, GamePlayer>();
 const sockets = new Map<string, Socket>();
 const queue: string[] = [];
 const games = new Map<string, GameState>();
+
+// Track disconnected players for reconnection
+const disconnectedPlayers = new Map<string, { 
+    gameId: string; 
+    playerData: GamePlayer; 
+    disconnectTime: number;
+    opponentSocketId: string;
+}>();
+
+// Reconnection timeout (30 seconds)
+const RECONNECTION_TIMEOUT = 30000;
 
 // Rate limiting for security
 const rateLimits = new Map<string, { lastAction: number; actionCount: number }>();
@@ -329,6 +426,161 @@ async function verifyToken(token: string) {
     }
 }
 
+// Helper function to find game by player socket ID
+function findGameByPlayerId(socketId: string): GameState | null {
+    for (const [gameId, game] of games.entries()) {
+        if (game.players.some(player => player.id === socketId)) {
+            return game;
+        }
+    }
+    return null;
+}
+
+// Helper function to handle player disconnection during game
+function handlePlayerDisconnection(socketId: string) {
+    const game = findGameByPlayerId(socketId);
+    if (!game) return;
+    
+    const playerIndex = game.players.findIndex(p => p.id === socketId);
+    if (playerIndex === -1) return;
+    
+    const opponentIndex = 1 - playerIndex;
+    const opponent = game.players[opponentIndex];
+    const opponentSocket = sockets.get(opponent.id);
+    
+    // Store disconnected player data for potential reconnection
+    const client = clients.get(socketId);
+    if (client && client.supabaseId) {
+        disconnectedPlayers.set(client.supabaseId, {
+            gameId: game.id,
+            playerData: game.players[playerIndex],
+            disconnectTime: Date.now(),
+            opponentSocketId: opponent.id
+        });
+        
+        console.log(`Player ${client.username} disconnected from game ${game.id}, allowing reconnection`);
+        
+        // Notify opponent about disconnection
+        if (opponentSocket) {
+            opponentSocket.emit('opponentDisconnected', {
+                message: `${client.username} disconnected. They have ${RECONNECTION_TIMEOUT / 1000} seconds to reconnect.`,
+                canReconnect: true,
+                timeoutSeconds: RECONNECTION_TIMEOUT / 1000
+            });
+        }
+        
+        // Set timeout to clean up if no reconnection
+        setTimeout(() => {
+            const disconnectedData = disconnectedPlayers.get(client.supabaseId!);
+            if (disconnectedData && disconnectedData.gameId === game.id) {
+                // Player didn't reconnect, end the game
+                console.log(`Player ${client.username} failed to reconnect, ending game ${game.id}`);
+                
+                disconnectedPlayers.delete(client.supabaseId!);
+                games.delete(game.id);
+                
+                // Notify opponent of game end
+                const currentOpponentSocket = sockets.get(disconnectedData.opponentSocketId);
+                if (currentOpponentSocket) {
+                    currentOpponentSocket.emit('gameOver', {
+                        reason: 'opponent_disconnected',
+                        message: `${client.username} failed to reconnect. You win by default!`,
+                        winner: opponent.username
+                    });
+                    
+                    // Put opponent back in queue
+                    currentOpponentSocket.emit('opponentDisconnected', {
+                        message: 'Opponent disconnected. Returning to lobby.',
+                        canReconnect: false
+                    });
+                }
+            }
+        }, RECONNECTION_TIMEOUT);
+    } else {
+        // No reconnection possible, immediately end game
+        console.log(`Player disconnected from game ${game.id}, ending game immediately`);
+        
+        games.delete(game.id);
+        
+        if (opponentSocket) {
+            opponentSocket.emit('gameOver', {
+                reason: 'opponent_disconnected',
+                message: 'Opponent disconnected. You win by default!',
+                winner: opponent.username
+            });
+            
+            opponentSocket.emit('opponentDisconnected', {
+                message: 'Opponent disconnected. Returning to lobby.',
+                canReconnect: false
+            });
+        }
+    }
+}
+
+// Helper function to attempt player reconnection
+function attemptReconnection(socket: Socket, user: any): boolean {
+    const disconnectedData = disconnectedPlayers.get(user.id);
+    if (!disconnectedData) return false;
+    
+    const game = games.get(disconnectedData.gameId);
+    if (!game) {
+        // Game no longer exists
+        disconnectedPlayers.delete(user.id);
+        return false;
+    }
+    
+    // Check if reconnection timeout has passed
+    if (Date.now() - disconnectedData.disconnectTime > RECONNECTION_TIMEOUT) {
+        disconnectedPlayers.delete(user.id);
+        return false;
+    }
+    
+    // Reconnect the player
+    const playerIndex = game.players.findIndex(p => p.id === disconnectedData.playerData.id);
+    if (playerIndex !== -1) {
+        // Update the player's socket ID
+        game.players[playerIndex].id = socket.id;
+        
+        // Update our tracking maps
+        clients.set(socket.id, {
+            ...disconnectedData.playerData,
+            id: socket.id
+        });
+        sockets.set(socket.id, socket);
+        
+        // Notify both players of successful reconnection
+        const opponentIndex = 1 - playerIndex;
+        const opponentSocket = sockets.get(game.players[opponentIndex].id);
+        
+        socket.emit('gameReconnected', {
+            gameState: game,
+            playerNumber: playerIndex,
+            opponentNumber: opponentIndex,
+            message: 'Successfully reconnected to game!'
+        });
+        
+        if (opponentSocket) {
+            opponentSocket.emit('opponentReconnected', {
+                message: `${user.username} reconnected to the game!`
+            });
+        }
+        
+        // Sync game state
+        socket.emit('syncState', game);
+        if (opponentSocket) {
+            opponentSocket.emit('syncState', game);
+        }
+        
+        // Clean up disconnection data
+        disconnectedPlayers.delete(user.id);
+        
+        console.log(`Player ${user.username} successfully reconnected to game ${game.id}`);
+        return true;
+    }
+    
+    return false;
+}
+
 function tryToMatch(socketId: string) {
     if (queue.length === 0) {
         queue.push(socketId);
@@ -398,23 +650,37 @@ io.use(async (socket, next) => {
 io.on('connection', (socket: Socket) => {
     const user = (socket as any).user;
     console.log('Backend: Client connected:', socket.id, 'User:', user?.username);
-    sockets.set(socket.id, socket);
-    clients.set(socket.id, {
-        id: socket.id,
-        username: user.username,
-        supabaseId: user.id,
-        xp: user.xp,
-        level: user.level,
-        cards: [],
-        deadCards: [],
-        inPlayCards: []
-    });
+    
+    // Check if this is a reconnection to an existing game
+    const reconnected = attemptReconnection(socket, user);
+    
+    if (!reconnected) {
+        // New connection, set up normally
+        sockets.set(socket.id, socket);
+        clients.set(socket.id, {
+            id: socket.id,
+            username: user.username,
+            supabaseId: user.id,
+            xp: user.xp,
+            level: user.level,
+            cards: [],
+            deadCards: [],
+            inPlayCards: []
+        });
+    }
 
     socket.on('disconnect', () => {
         console.log('Backend: Client disconnected:', socket.id);
+        
+        // Handle disconnection during active game
+        handlePlayerDisconnection(socket.id);
+        
+        // Clean up client data
         clients.delete(socket.id);
         sockets.delete(socket.id);
         rateLimits.delete(socket.id); // Clean up rate limits
+        
+        // Remove from queue if present
         const idx = queue.indexOf(socket.id);
         if (idx !== -1) queue.splice(idx, 1);
     });
@@ -510,10 +776,37 @@ io.on('connection', (socket: Socket) => {
             game.players[playerIndex].inPlayCards[detail.attacker] = attacker;
             game.players[opponentIndex].inPlayCards[detail.opponent] = defender;
             
-            // Send attack events
-            socket.emit('attack', { yourIndex: detail.attacker, theirIndex: detail.opponent, kill: isKilled });
+            // Determine attack type
+            const attackType = getAttackType(attacker.index, detail.stat);
+            
+            // Send attack events with detailed information
+            const attackInfo = {
+                yourIndex: detail.attacker,
+                theirIndex: detail.opponent,
+                kill: isKilled,
+                attackerName: strain.Strain,
+                defenderName: strains[game.players[opponentIndex].inPlayCards[detail.opponent]?.index]?.Strain || 'Unknown',
+                stat: detail.stat,
+                damage: attackerStat,
+                color: strain.Primary,
+                attackType: attackType
+            };
+            
+            const opponentAttackInfo = {
+                yourIndex: detail.opponent,
+                theirIndex: detail.attacker,
+                kill: isKilled,
+                attackerName: strain.Strain,
+                defenderName: strains[game.players[opponentIndex].inPlayCards[detail.opponent]?.index]?.Strain || 'Unknown',
+                stat: detail.stat,
+                damage: attackerStat,
+                color: strain.Primary,
+                attackType: attackType
+            };
+            
+            socket.emit('attack', attackInfo);
             const opponentSocket = sockets.get(game.players[opponentIndex].id);
-            opponentSocket?.emit('attack', { yourIndex: detail.opponent, theirIndex: detail.attacker, kill: isKilled });
+            opponentSocket?.emit('attack', opponentAttackInfo);
             
             // Handle death
             if (isKilled) {
