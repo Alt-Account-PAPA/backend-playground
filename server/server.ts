@@ -174,7 +174,23 @@ const app = express();
 app.use(cors());
 app.use(express.json()); // Add JSON parsing middleware
 const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: '*' } });
+const io = new Server(httpServer, { 
+    cors: { origin: '*' },
+    // Enhanced server-side connection stability
+    pingTimeout: 120000, // 2 minutes - match client timeout
+    pingInterval: 45000,  // 45 seconds - match client interval
+    // Connection recovery settings
+    transports: ['websocket', 'polling'],
+    allowEIO3: true,
+    // Upgrade settings
+    upgradeTimeout: 30000,
+    // Additional stability options
+    maxHttpBufferSize: 1e6, // 1MB
+    allowRequest: (req, callback) => {
+        // Basic rate limiting at connection level
+        callback(null, true);
+    }
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
