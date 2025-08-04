@@ -241,6 +241,12 @@ function calculateXpGain(isWin: boolean, gameDuration?: number): number {
 app.get('/api/profile', authenticateToken, async (req: any, res) => {
     try {
         const user = req.user;
+        
+        // SECURITY: Guests don't have database profiles
+        if (user.isGuest) {
+            return res.status(403).json({ error: 'Guests do not have persistent profiles' });
+        }
+        
         const { data, error } = await supabase
             .from('profiles')
             .select('*')
@@ -266,9 +272,78 @@ app.get('/api/profile', authenticateToken, async (req: any, res) => {
     }
 });
 
+// Update user profile (authenticated users only)
+app.put('/api/profile', authenticateToken, async (req: any, res) => {
+    try {
+        // SECURITY: Prevent guests from updating database profiles
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests cannot update persistent profiles' });
+        }
+        
+        const { username } = req.body;
+        const userId = req.user.id;
+        
+        if (!username || typeof username !== 'string' || !username.trim()) {
+            return res.status(400).json({ error: 'Valid username required' });
+        }
+        
+        // SECURITY: Validate and sanitize username
+        const sanitizedUsername = username.trim().replace(/[<>"'&]/g, '');
+        if (sanitizedUsername.length < 3 || sanitizedUsername.length > 20) {
+            return res.status(400).json({ error: 'Username must be between 3 and 20 characters' });
+        }
+        
+        if (!/^[a-zA-Z0-9_\-\s]+$/.test(sanitizedUsername)) {
+            return res.status(400).json({ error: 'Username contains invalid characters' });
+        }
+        
+        // Get current profile
+        const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', userId)
+            .single();
+            
+        if (profileError || !profile) {
+            return res.status(404).json({ error: 'Profile not found' });
+        }
+        
+        // Update profile
+        const { data: updatedProfile, error: updateError } = await supabase
+            .from('profiles')
+            .update({ username: sanitizedUsername })
+            .eq('id', userId)
+            .select()
+            .single();
+            
+        if (updateError) {
+            console.error('Error updating profile:', updateError);
+            return res.status(500).json({ error: 'Failed to update profile' });
+        }
+        
+        // Calculate additional stats
+        const totalGames = updatedProfile.wins + updatedProfile.losses;
+        const winRate = totalGames > 0 ? Math.round((updatedProfile.wins / totalGames) * 100) : 0;
+        
+        res.json({
+            ...updatedProfile,
+            totalGames,
+            winRate
+        });
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Create user profile
 app.post('/api/profile', authenticateToken, async (req: any, res) => {
     try {
+        // SECURITY: Prevent guests from creating database profiles
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests cannot create persistent profiles' });
+        }
+        
         const { username } = req.body;
         const userId = req.user.id;
         
@@ -318,6 +393,11 @@ app.post('/api/profile', authenticateToken, async (req: any, res) => {
 // Handle game result and update XP/stats
 app.post('/api/game/result', authenticateToken, async (req: any, res) => {
     try {
+        // SECURITY: Prevent guests from submitting results to database
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guest results are not saved to database' });
+        }
+        
         const { gameId, result, gameData } = req.body;
         const userId = req.user.id;
         
@@ -468,9 +548,9 @@ function handlePlayerDisconnection(socketId: string) {
     const opponent = game.players[opponentIndex];
     const opponentSocket = sockets.get(opponent.id);
     
-    // Store disconnected player data for potential reconnection
+    // Store disconnected player data for potential reconnection (only for authenticated users)
     const client = clients.get(socketId);
-    if (client && client.supabaseId) {
+    if (client && client.supabaseId && !client.isGuest) {
         disconnectedPlayers.set(client.supabaseId, {
             gameId: game.id,
             playerData: game.players[playerIndex],
@@ -791,21 +871,53 @@ function tryToMatch(socketId: string) {
     playersInMatchmaking.delete(opponentId);
 }
 
-// Socket.IO authentication middleware with logging
+// SECURITY: Socket.IO authentication middleware with guest support
+// - Validates all tokens (both Supabase JWT and guest tokens)
+// - Creates secure user objects for both authenticated and guest users
+// - Prevents privilege escalation between user types
 io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
-    console.log('Received token:', token);
+    const isGuest = socket.handshake.auth?.isGuest;
+    console.log('Received token:', token, 'isGuest:', isGuest);
+    
     if (!token) {
         console.log('No token received');
         return next(new Error('Authentication required'));
     }
-    const user = await verifyToken(token);
-    if (!user) {
-        console.log('Token verification failed for:', token);
-        return next(new Error('Invalid token'));
+    
+    if (isGuest) {
+        // Handle guest users
+        if (!token.startsWith('guest_')) {
+            console.log('Invalid guest token format');
+            return next(new Error('Invalid guest token'));
+        }
+        
+        // Create a guest user object
+        const guestId = token;
+        const guestNumber = Math.floor(Math.random() * 9999) + 1;
+        const guestUser = {
+            id: guestId,
+            username: `Guest${guestNumber}`,
+            xp: 0,
+            level: 1,
+            wins: 0,
+            losses: 0,
+            isGuest: true
+        };
+        
+        console.log('Guest user authenticated:', guestUser.username);
+        (socket as any).user = guestUser;
+        next();
+    } else {
+        // Handle regular authenticated users
+        const user = await verifyToken(token);
+        if (!user) {
+            console.log('Token verification failed for:', token);
+            return next(new Error('Invalid token'));
+        }
+        (socket as any).user = user;
+        next();
     }
-    (socket as any).user = user;
-    next();
 });
 
 io.on('connection', (socket: Socket) => {
@@ -821,12 +933,13 @@ io.on('connection', (socket: Socket) => {
         clients.set(socket.id, {
             id: socket.id,
             username: user.username,
-            supabaseId: user.id,
-            xp: user.xp,
-            level: user.level,
+            supabaseId: user.isGuest ? null : user.id, // No supabase ID for guests
+            xp: user.xp || 0,
+            level: user.level || 1,
             cards: [],
             deadCards: [],
-            inPlayCards: []
+            inPlayCards: [],
+            isGuest: user.isGuest || false
         });
     }
 
@@ -868,6 +981,18 @@ io.on('connection', (socket: Socket) => {
             return;
         }
         
+        // SECURITY: Validate and sanitize username for all users (including guests)
+        const sanitizedUsername = username.trim().replace(/[<>"'&]/g, '');
+        if (sanitizedUsername.length < 3 || sanitizedUsername.length > 20) {
+            socket.emit('error', 'Username must be between 3 and 20 characters');
+            return;
+        }
+        
+        if (!/^[a-zA-Z0-9_\-\s]+$/.test(sanitizedUsername)) {
+            socket.emit('error', 'Username contains invalid characters');
+            return;
+        }
+        
         // Check if player is already in a game
         const existingGame = findGameByPlayerId(socket.id);
         if (existingGame) {
@@ -884,7 +1009,7 @@ io.on('connection', (socket: Socket) => {
         
         const client = clients.get(socket.id);
         if (client) {
-            client.username = username.trim();
+            client.username = sanitizedUsername; // Use sanitized username
             console.log(`Player ${client.username} (${socket.id}) joining queue`);
         }
         
@@ -900,10 +1025,18 @@ io.on('connection', (socket: Socket) => {
 
     socket.on('attack', async ({ gameId, detail }) => {
         try {
-            // SECURITY: Rate limiting
+            // SECURITY: Rate limiting (applies to all users including guests)
             if (!checkRateLimit(socket.id)) {
                 console.log(`Rate limit exceeded for ${socket.id}`);
                 socket.emit('error', 'Too many actions. Please slow down.');
+                return;
+            }
+            
+            // SECURITY: Additional validation for all users
+            const user = (socket as any).user;
+            if (!user) {
+                console.log(`No user data for ${socket.id}`);
+                socket.emit('error', 'Authentication required');
                 return;
             }
             
@@ -1057,10 +1190,32 @@ io.on('connection', (socket: Socket) => {
     });
 
     socket.on('makeMove', ({ gameId, detail }) => {
+        // SECURITY: Rate limiting and validation for all users
+        if (!checkRateLimit(socket.id)) {
+            console.log(`Rate limit exceeded for ${socket.id}`);
+            socket.emit('error', 'Too many actions. Please slow down.');
+            return;
+        }
+        
+        // SECURITY: User validation
+        const user = (socket as any).user;
+        if (!user) {
+            console.log(`No user data for ${socket.id}`);
+            socket.emit('error', 'Authentication required');
+            return;
+        }
+        
         const game = games.get(gameId);
-        if (!game) return;
+        if (!game) {
+            console.log(`Game not found: ${gameId}`);
+            return;
+        }
+        
         const playerIndex = game.players.findIndex((p) => p.id === socket.id);
-        if (playerIndex === -1 || playerIndex !== game.currentTurn) return;
+        if (playerIndex === -1 || playerIndex !== game.currentTurn) {
+            console.log(`Invalid turn for ${socket.id}`);
+            return;
+        }
         if (detail.type === 'drawCard') {
             const newCard = game.players[playerIndex].cards.shift();
             if (newCard) {
