@@ -105,6 +105,9 @@ const sockets = new Map<string, Socket>();
 const queue: string[] = [];
 const games = new Map<string, GameState>();
 
+// Track players currently in matchmaking to prevent double-matching
+const playersInMatchmaking = new Set<string>();
+
 // Track disconnected players for reconnection
 const disconnectedPlayers = new Map<string, { 
     gameId: string; 
@@ -198,220 +201,6 @@ app.get('/debug/state', (req, res) => {
         }))
     };
     res.json(state);
-});
-
-// Authentication middleware for API routes
-async function authenticateToken(req: any, res: any, next: any) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
-    
-    if (!token) {
-        return res.status(401).json({ error: 'Access token required' });
-    }
-    
-    const user = await verifyToken(token);
-    if (!user) {
-        return res.status(403).json({ error: 'Invalid or expired token' });
-    }
-    
-    req.user = user;
-    next();
-}
-
-// XP and Level calculation functions
-function calculateLevel(xp: number): number {
-    return Math.floor(Math.sqrt(xp / 100)) + 1;
-}
-
-function getXpForLevel(level: number): number {
-    return Math.pow(level - 1, 2) * 100;
-}
-
-function calculateXpGain(isWin: boolean, gameDuration?: number): number {
-    const baseXp = isWin ? 100 : 25;
-    const bonusXp = Math.floor(Math.random() * 50); // 0-49 random bonus
-    return baseXp + bonusXp;
-}
-
-// API Routes
-
-// Get user profile
-app.get('/api/profile', authenticateToken, async (req: any, res) => {
-    try {
-        const user = req.user;
-        const { data, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', user.id)
-            .single();
-            
-        if (error) {
-            return res.status(404).json({ error: 'Profile not found' });
-        }
-        
-        // Calculate additional stats
-        const totalGames = data.wins + data.losses;
-        const winRate = totalGames > 0 ? Math.round((data.wins / totalGames) * 100) : 0;
-        
-        res.json({
-            ...data,
-            totalGames,
-            winRate
-        });
-    } catch (error) {
-        console.error('Error fetching profile:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Create user profile
-app.post('/api/profile', authenticateToken, async (req: any, res) => {
-    try {
-        const { username } = req.body;
-        const userId = req.user.id;
-        
-        if (!username || typeof username !== 'string' || !username.trim()) {
-            return res.status(400).json({ error: 'Valid username required' });
-        }
-        
-        // Check if profile already exists
-        const { data: existing } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('id', userId)
-            .single();
-            
-        if (existing) {
-            return res.status(409).json({ error: 'Profile already exists' });
-        }
-        
-        // Create new profile
-        const newProfile = {
-            id: userId,
-            username: username.trim(),
-            xp: 0,
-            level: 1,
-            wins: 0,
-            losses: 0
-        };
-        
-        const { data, error } = await supabase
-            .from('profiles')
-            .insert([newProfile])
-            .select()
-            .single();
-            
-        if (error) {
-            console.error('Error creating profile:', error);
-            return res.status(500).json({ error: 'Failed to create profile' });
-        }
-        
-        res.status(201).json(data);
-    } catch (error) {
-        console.error('Error creating profile:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Handle game result and update XP/stats
-app.post('/api/game/result', authenticateToken, async (req: any, res) => {
-    try {
-        const { gameId, result, gameData } = req.body;
-        const userId = req.user.id;
-        
-        // Validate input
-        if (!gameId || !result || !['win', 'loss'].includes(result)) {
-            return res.status(400).json({ error: 'Invalid game result data' });
-        }
-        
-        // Get current profile
-        const { data: profile, error: profileError } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', userId)
-            .single();
-            
-        if (profileError || !profile) {
-            return res.status(404).json({ error: 'Profile not found' });
-        }
-        
-        // Calculate XP gain
-        const xpGained = calculateXpGain(result === 'win');
-        const newXp = profile.xp + xpGained;
-        const oldLevel = profile.level;
-        const newLevel = calculateLevel(newXp);
-        
-        // Update profile with new stats
-        const updates = {
-            xp: newXp,
-            level: newLevel,
-            ...(result === 'win' ? { wins: profile.wins + 1 } : { losses: profile.losses + 1 })
-        };
-        
-        const { data: updatedProfile, error: updateError } = await supabase
-            .from('profiles')
-            .update(updates)
-            .eq('id', userId)
-            .select()
-            .single();
-            
-        if (updateError) {
-            console.error('Error updating profile:', updateError);
-            return res.status(500).json({ error: 'Failed to update profile' });
-        }
-        
-        // Log game result for audit trail
-        await supabase
-            .from('game_results')
-            .insert({
-                game_id: gameId,
-                player_id: userId,
-                result,
-                xp_gained: xpGained
-            });
-        
-        res.json({
-            xpGained,
-            oldLevel,
-            newLevel,
-            newStats: updatedProfile
-        });
-        
-    } catch (error) {
-        console.error('Error processing game result:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Get leaderboard
-app.get('/api/leaderboard', async (req, res) => {
-    try {
-        const { data, error } = await supabase
-            .from('profiles')
-            .select('username, level, xp, wins, losses')
-            .order('level', { ascending: false })
-            .order('xp', { ascending: false })
-            .limit(50);
-            
-        if (error) {
-            console.error('Error fetching leaderboard:', error);
-            return res.status(500).json({ error: 'Failed to fetch leaderboard' });
-        }
-        
-        const leaderboard = data.map((player, index) => ({
-            rank: index + 1,
-            ...player,
-            totalGames: player.wins + player.losses,
-            winRate: player.wins + player.losses > 0 
-                ? Math.round((player.wins / (player.wins + player.losses)) * 100) 
-                : 0
-        }));
-        
-        res.json(leaderboard);
-    } catch (error) {
-        console.error('Error fetching leaderboard:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
 });
 
 // Helper: Verify Supabase JWT and get user profile
@@ -599,53 +388,194 @@ function attemptReconnection(socket: Socket, user: any): boolean {
     return false;
 }
 
+// Clean up stale queue entries
+function cleanupQueue() {
+    const validQueue: string[] = [];
+    
+    for (const socketId of queue) {
+        if (sockets.has(socketId) && clients.has(socketId) && !findGameByPlayerId(socketId)) {
+            validQueue.push(socketId);
+        }
+    }
+    
+    if (validQueue.length !== queue.length) {
+        console.log(`Queue cleanup: ${queue.length} -> ${validQueue.length}`);
+        queue.length = 0;
+        queue.push(...validQueue);
+    }
+}
+
+// Validate game state consistency
+function validateGameState(gameId: string): boolean {
+    const game = games.get(gameId);
+    if (!game) return false;
+    
+    // Check if both players are still connected
+    for (const player of game.players) {
+        if (!sockets.has(player.id) || !clients.has(player.id)) {
+            console.log(`Game ${gameId} has disconnected player ${player.id}`);
+            return false;
+        }
+    }
+    
+    // Check if players are in different games
+    for (const player of game.players) {
+        const client = clients.get(player.id);
+        if (client && client.gameId && client.gameId !== gameId) {
+            console.log(`Player ${player.id} is in different game ${client.gameId} vs ${gameId}`);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Fix game state conflicts
+function resolveGameConflicts() {
+    const gamesToRemove: string[] = [];
+    
+    for (const [gameId, game] of games.entries()) {
+        if (!validateGameState(gameId)) {
+            console.log(`Removing invalid game ${gameId}`);
+            gamesToRemove.push(gameId);
+            
+            // Notify players if they're still connected
+            for (const player of game.players) {
+                const socket = sockets.get(player.id);
+                if (socket) {
+                    socket.emit('gameOver', {
+                        reason: 'game_state_conflict',
+                        message: 'Game ended due to connection issues. Please try again.'
+                    });
+                }
+            }
+        }
+    }
+    
+    // Remove invalid games
+    for (const gameId of gamesToRemove) {
+        games.delete(gameId);
+    }
+    
+    return gamesToRemove.length;
+}
+
 function tryToMatch(socketId: string) {
-    if (queue.length === 0) {
-        queue.push(socketId);
+    // Prevent double-matching
+    if (playersInMatchmaking.has(socketId)) {
+        console.log(`Player ${socketId} already in matchmaking process`);
         return;
     }
+    
+    // Check if player is already in a game
+    const existingGame = findGameByPlayerId(socketId);
+    if (existingGame) {
+        console.log(`Player ${socketId} already in game ${existingGame.id}`);
+        return;
+    }
+    
+    // Clean up stale queue entries
+    cleanupQueue();
+    
+    if (queue.length === 0) {
+        if (!queue.includes(socketId)) {
+            queue.push(socketId);
+            console.log(`Player ${socketId} added to queue. Queue length: ${queue.length}`);
+        }
+        return;
+    }
+    
+    // Find a valid opponent
     let opponentId: string | undefined;
     while (queue.length > 0) {
         const candidate = queue.shift();
-        if (candidate && candidate !== socketId && sockets.has(candidate) && clients.has(candidate)) {
+        if (candidate && 
+            candidate !== socketId && 
+            sockets.has(candidate) && 
+            clients.has(candidate) &&
+            !playersInMatchmaking.has(candidate) &&
+            !findGameByPlayerId(candidate)) {
             opponentId = candidate;
             break;
         }
     }
+    
     if (!opponentId) {
-        if (!queue.includes(socketId)) queue.push(socketId);
+        if (!queue.includes(socketId)) {
+            queue.push(socketId);
+            console.log(`No valid opponent found. Player ${socketId} added to queue. Queue length: ${queue.length}`);
+        }
         return;
     }
+    
+    // Mark both players as in matchmaking
+    playersInMatchmaking.add(socketId);
+    playersInMatchmaking.add(opponentId);
+    
     const player1 = clients.get(socketId);
     const player2 = clients.get(opponentId);
     const socket1 = sockets.get(socketId);
     const socket2 = sockets.get(opponentId);
+    
     if (player1 && player2 && socket1 && socket2) {
-        const gameId = `game-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-        const gameState = createNewGame(gameId, player1, player2);
-        games.set(gameId, gameState);
-        player1.gameId = gameId;
-        player2.gameId = gameId;
-        socket1.emit('matchFound', {
-            gameId,
-            gameState,
-            opponent: player2.username,
-            playerNumber: 0,
-            opponentNumber: 1
-        });
-        socket2.emit('matchFound', {
-            gameId,
-            gameState,
-            opponent: player1.username,
-            playerNumber: 1,
-            opponentNumber: 0
-        });
-        socket1.emit('syncState', gameState);
-        socket2.emit('syncState', gameState);
+        try {
+            const gameId = `game-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            const gameState = createNewGame(gameId, player1, player2);
+            
+            // Validate game creation
+            if (!gameState || !gameState.players || gameState.players.length !== 2) {
+                throw new Error('Failed to create valid game state');
+            }
+            
+            games.set(gameId, gameState);
+            player1.gameId = gameId;
+            player2.gameId = gameId;
+            
+            console.log(`Match created: ${player1.username} vs ${player2.username} (Game: ${gameId})`);
+            
+            // Send match notifications
+            socket1.emit('matchFound', {
+                gameId,
+                gameState,
+                opponent: player2.username,
+                playerNumber: 0,
+                opponentNumber: 1
+            });
+            
+            socket2.emit('matchFound', {
+                gameId,
+                gameState,
+                opponent: player1.username,
+                playerNumber: 1,
+                opponentNumber: 0
+            });
+            
+            // Sync initial game state
+            socket1.emit('syncState', gameState);
+            socket2.emit('syncState', gameState);
+            
+        } catch (error) {
+            console.error('Error creating match:', error);
+            
+            // Return players to queue on error
+            if (!queue.includes(socketId)) queue.push(socketId);
+            if (!queue.includes(opponentId)) queue.push(opponentId);
+        }
     } else {
-        if (socketId && !queue.includes(socketId)) queue.push(socketId);
-        if (opponentId && !queue.includes(opponentId)) queue.push(opponentId);
+        console.log('Invalid player data for match creation');
+        
+        // Return valid players to queue
+        if (socketId && sockets.has(socketId) && clients.has(socketId) && !queue.includes(socketId)) {
+            queue.push(socketId);
+        }
+        if (opponentId && sockets.has(opponentId) && clients.has(opponentId) && !queue.includes(opponentId)) {
+            queue.push(opponentId);
+        }
     }
+    
+    // Remove from matchmaking tracking
+    playersInMatchmaking.delete(socketId);
+    playersInMatchmaking.delete(opponentId);
 }
 
 // Socket.IO authentication middleware with logging
