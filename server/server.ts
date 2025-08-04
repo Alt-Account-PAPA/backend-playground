@@ -3,7 +3,6 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import { createClient } from '@supabase/supabase-js';
-import jwt from 'jsonwebtoken';
 import createNewGame, { GameState, GamePlayer } from '../src/lib/util/createNewGame';
 import { strains } from '../src/lib/config';
 import { fileURLToPath } from 'url';
@@ -201,6 +200,220 @@ app.get('/debug/state', (req, res) => {
         }))
     };
     res.json(state);
+});
+
+// Authentication middleware for API routes
+async function authenticateToken(req: any, res: any, next: any) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access token required' });
+    }
+    
+    const user = await verifyToken(token);
+    if (!user) {
+        return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    
+    req.user = user;
+    next();
+}
+
+// XP and Level calculation functions
+function calculateLevel(xp: number): number {
+    return Math.floor(Math.sqrt(xp / 100)) + 1;
+}
+
+function getXpForLevel(level: number): number {
+    return Math.pow(level - 1, 2) * 100;
+}
+
+function calculateXpGain(isWin: boolean, gameDuration?: number): number {
+    const baseXp = isWin ? 100 : 25;
+    const bonusXp = Math.floor(Math.random() * 50); // 0-49 random bonus
+    return baseXp + bonusXp;
+}
+
+// API Routes
+
+// Get user profile
+app.get('/api/profile', authenticateToken, async (req: any, res) => {
+    try {
+        const user = req.user;
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', user.id)
+            .single();
+            
+        if (error) {
+            return res.status(404).json({ error: 'Profile not found' });
+        }
+        
+        // Calculate additional stats
+        const totalGames = data.wins + data.losses;
+        const winRate = totalGames > 0 ? Math.round((data.wins / totalGames) * 100) : 0;
+        
+        res.json({
+            ...data,
+            totalGames,
+            winRate
+        });
+    } catch (error) {
+        console.error('Error fetching profile:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Create user profile
+app.post('/api/profile', authenticateToken, async (req: any, res) => {
+    try {
+        const { username } = req.body;
+        const userId = req.user.id;
+        
+        if (!username || typeof username !== 'string' || !username.trim()) {
+            return res.status(400).json({ error: 'Valid username required' });
+        }
+        
+        // Check if profile already exists
+        const { data: existing } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('id', userId)
+            .single();
+            
+        if (existing) {
+            return res.status(409).json({ error: 'Profile already exists' });
+        }
+        
+        // Create new profile
+        const newProfile = {
+            id: userId,
+            username: username.trim(),
+            xp: 0,
+            level: 1,
+            wins: 0,
+            losses: 0
+        };
+        
+        const { data, error } = await supabase
+            .from('profiles')
+            .insert([newProfile])
+            .select()
+            .single();
+            
+        if (error) {
+            console.error('Error creating profile:', error);
+            return res.status(500).json({ error: 'Failed to create profile' });
+        }
+        
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating profile:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Handle game result and update XP/stats
+app.post('/api/game/result', authenticateToken, async (req: any, res) => {
+    try {
+        const { gameId, result, gameData } = req.body;
+        const userId = req.user.id;
+        
+        // Validate input
+        if (!gameId || !result || !['win', 'loss'].includes(result)) {
+            return res.status(400).json({ error: 'Invalid game result data' });
+        }
+        
+        // Get current profile
+        const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', userId)
+            .single();
+            
+        if (profileError || !profile) {
+            return res.status(404).json({ error: 'Profile not found' });
+        }
+        
+        // Calculate XP gain
+        const xpGained = calculateXpGain(result === 'win');
+        const newXp = profile.xp + xpGained;
+        const oldLevel = profile.level;
+        const newLevel = calculateLevel(newXp);
+        
+        // Update profile with new stats
+        const updates = {
+            xp: newXp,
+            level: newLevel,
+            ...(result === 'win' ? { wins: profile.wins + 1 } : { losses: profile.losses + 1 })
+        };
+        
+        const { data: updatedProfile, error: updateError } = await supabase
+            .from('profiles')
+            .update(updates)
+            .eq('id', userId)
+            .select()
+            .single();
+            
+        if (updateError) {
+            console.error('Error updating profile:', updateError);
+            return res.status(500).json({ error: 'Failed to update profile' });
+        }
+        
+        // Log game result for audit trail
+        await supabase
+            .from('game_results')
+            .insert({
+                game_id: gameId,
+                player_id: userId,
+                result,
+                xp_gained: xpGained
+            });
+        
+        res.json({
+            xpGained,
+            oldLevel,
+            newLevel,
+            newStats: updatedProfile
+        });
+        
+    } catch (error) {
+        console.error('Error processing game result:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get leaderboard
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('username, level, xp, wins, losses')
+            .order('level', { ascending: false })
+            .order('xp', { ascending: false })
+            .limit(50);
+            
+        if (error) {
+            console.error('Error fetching leaderboard:', error);
+            return res.status(500).json({ error: 'Failed to fetch leaderboard' });
+        }
+        
+        const leaderboard = data.map((player, index) => ({
+            rank: index + 1,
+            ...player,
+            totalGames: player.wins + player.losses,
+            winRate: player.wins + player.losses > 0 
+                ? Math.round((player.wins / (player.wins + player.losses)) * 100) 
+                : 0
+        }));
+        
+        res.json(leaderboard);
+    } catch (error) {
+        console.error('Error fetching leaderboard:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // Helper: Verify Supabase JWT and get user profile
