@@ -182,6 +182,24 @@ app.use(express.static(staticPath));
 // Health check endpoint for Railway
 app.get('/', (req, res) => res.send('OK'));
 
+// Debug endpoint to check server state
+app.get('/debug/state', (req, res) => {
+    const state = {
+        queue: queue.length,
+        activeGames: games.size,
+        connectedClients: clients.size,
+        connectedSockets: sockets.size,
+        disconnectedPlayers: disconnectedPlayers.size,
+        playersInMatchmaking: playersInMatchmaking.size,
+        games: Array.from(games.entries()).map(([id, game]) => ({
+            id,
+            players: game.players.map(p => ({ id: p.id, username: p.username })),
+            currentTurn: game.currentTurn
+        }))
+    };
+    res.json(state);
+});
+
 // Authentication middleware for API routes
 async function authenticateToken(req: any, res: any, next: any) {
     const authHeader = req.headers['authorization'];
@@ -675,14 +693,23 @@ io.on('connection', (socket: Socket) => {
         // Handle disconnection during active game
         handlePlayerDisconnection(socket.id);
         
+        // Clean up matchmaking tracking
+        playersInMatchmaking.delete(socket.id);
+        
         // Clean up client data
         clients.delete(socket.id);
         sockets.delete(socket.id);
-        rateLimits.delete(socket.id); // Clean up rate limits
+        rateLimits.delete(socket.id);
         
         // Remove from queue if present
         const idx = queue.indexOf(socket.id);
-        if (idx !== -1) queue.splice(idx, 1);
+        if (idx !== -1) {
+            queue.splice(idx, 1);
+            console.log(`Removed ${socket.id} from queue. Queue length: ${queue.length}`);
+        }
+        
+        // Clean up any stale queue entries
+        cleanupQueue();
     });
 
     // Robust joinQueue handler
@@ -691,13 +718,33 @@ io.on('connection', (socket: Socket) => {
             socket.emit('error', 'Invalid payload');
             return;
         }
+        
         const { username } = payload;
         if (!username || typeof username !== 'string' || !username.trim()) {
             socket.emit('error', 'Username required');
             return;
         }
+        
+        // Check if player is already in a game
+        const existingGame = findGameByPlayerId(socket.id);
+        if (existingGame) {
+            console.log(`Player ${socket.id} tried to join queue while in game ${existingGame.id}`);
+            socket.emit('error', 'Already in a game');
+            return;
+        }
+        
+        // Check if player is already in matchmaking
+        if (playersInMatchmaking.has(socket.id)) {
+            console.log(`Player ${socket.id} tried to join queue while in matchmaking`);
+            return;
+        }
+        
         const client = clients.get(socket.id);
-        if (client) client.username = username.trim();
+        if (client) {
+            client.username = username.trim();
+            console.log(`Player ${client.username} (${socket.id}) joining queue`);
+        }
+        
         tryToMatch(socket.id);
     });
 
@@ -893,7 +940,46 @@ io.on('connection', (socket: Socket) => {
     });
 });
 
+// Periodic cleanup to prevent memory leaks and stale data
+setInterval(() => {
+    // Clean up stale queue entries
+    cleanupQueue();
+    
+    // Resolve game state conflicts
+    const conflictsResolved = resolveGameConflicts();
+    if (conflictsResolved > 0) {
+        console.log(`Resolved ${conflictsResolved} game state conflicts`);
+    }
+    
+    // Clean up expired disconnected players
+    const now = Date.now();
+    for (const [userId, data] of disconnectedPlayers.entries()) {
+        if (now - data.disconnectTime > RECONNECTION_TIMEOUT) {
+            console.log(`Cleaning up expired disconnection data for user ${userId}`);
+            disconnectedPlayers.delete(userId);
+        }
+    }
+    
+    // Clean up stale rate limits
+    for (const [socketId, limit] of rateLimits.entries()) {
+        if (now - limit.lastAction > RATE_LIMIT_WINDOW * 10) { // 10x the window
+            rateLimits.delete(socketId);
+        }
+    }
+    
+    // Clean up matchmaking tracking for disconnected players
+    for (const socketId of playersInMatchmaking) {
+        if (!sockets.has(socketId)) {
+            playersInMatchmaking.delete(socketId);
+        }
+    }
+    
+    // Log current state
+    console.log(`Cleanup: ${queue.length} in queue, ${games.size} active games, ${disconnectedPlayers.size} disconnected players`);
+}, 30000); // Every 30 seconds
+
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
+    console.log('Matchmaking system initialized with conflict prevention');
 });
