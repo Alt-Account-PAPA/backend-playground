@@ -280,7 +280,8 @@ app.get('/api/profile', authenticateToken, async (req: any, res) => {
         res.json({
             ...data,
             totalGames,
-            winRate
+            winRate,
+            coins: data.coins || 0 // Ensure coins field is included
         });
     } catch (error) {
         console.error('Error fetching profile:', error);
@@ -378,14 +379,15 @@ app.post('/api/profile', authenticateToken, async (req: any, res) => {
             return res.status(409).json({ error: 'Profile already exists' });
         }
         
-        // Create new profile
+        // Create new profile with starter coins
         const newProfile = {
             id: userId,
             username: username.trim(),
             xp: 0,
             level: 1,
             wins: 0,
-            losses: 0
+            losses: 0,
+            coins: 200 // Starting coins for new players
         };
         
         const { data, error } = await supabase
@@ -398,6 +400,9 @@ app.post('/api/profile', authenticateToken, async (req: any, res) => {
             console.error('Error creating profile:', error);
             return res.status(500).json({ error: 'Failed to create profile' });
         }
+        
+        // Assign starter cards (2 uncommon + 6 common)
+        await assignStarterCards(userId);
         
         res.status(201).json(data);
     } catch (error) {
@@ -439,10 +444,15 @@ app.post('/api/game/result', authenticateToken, async (req: any, res) => {
         const oldLevel = profile.level;
         const newLevel = calculateLevel(newXp);
         
+        // Calculate coin reward (10 coins for win, 5 for loss)
+        const coinReward = result === 'win' ? 10 : 5;
+        const newCoins = (profile.coins || 0) + coinReward;
+        
         // Update profile with new stats
         const updates = {
             xp: newXp,
             level: newLevel,
+            coins: newCoins,
             ...(result === 'win' ? { wins: profile.wins + 1 } : { losses: profile.losses + 1 })
         };
         
@@ -472,11 +482,351 @@ app.post('/api/game/result', authenticateToken, async (req: any, res) => {
             xpGained,
             oldLevel,
             newLevel,
+            coinReward,
             newStats: updatedProfile
         });
         
     } catch (error) {
         console.error('Error processing game result:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Helper function to assign starter cards to new players
+async function assignStarterCards(userId: string) {
+    try {
+        // Get all common and uncommon cards from strains
+        const commonCards = [];
+        const uncommonCards = [];
+        
+        for (let i = 0; i < strains.length; i++) {
+            const card = strains[i];
+            if (card.Class === 'Common') {
+                commonCards.push(i);
+            } else if (card.Class === 'Uncommon') {
+                uncommonCards.push(i);
+            }
+        }
+        
+        // Randomly select 2 uncommon and 6 common cards
+        const selectedUncommon = [];
+        const selectedCommon = [];
+        
+        // Select 2 random uncommon cards
+        while (selectedUncommon.length < 2 && uncommonCards.length > 0) {
+            const randomIndex = Math.floor(Math.random() * uncommonCards.length);
+            const cardIndex = uncommonCards[randomIndex];
+            if (!selectedUncommon.includes(cardIndex)) {
+                selectedUncommon.push(cardIndex);
+            }
+        }
+        
+        // Select 6 random common cards
+        while (selectedCommon.length < 6 && commonCards.length > 0) {
+            const randomIndex = Math.floor(Math.random() * commonCards.length);
+            const cardIndex = commonCards[randomIndex];
+            if (!selectedCommon.includes(cardIndex)) {
+                selectedCommon.push(cardIndex);
+            }
+        }
+        
+        // Combine all starter cards
+        const starterCards = [...selectedUncommon, ...selectedCommon];
+        
+        // Insert cards into player inventory
+        const inventoryInserts = starterCards.map(cardIndex => ({
+            player_id: userId,
+            card_index: cardIndex,
+            quantity: 1
+        }));
+        
+        const { error: inventoryError } = await supabase
+            .from('player_inventory')
+            .insert(inventoryInserts);
+            
+        if (inventoryError) {
+            console.error('Error inserting starter cards:', inventoryError);
+            throw inventoryError;
+        }
+        
+        console.log(`Assigned ${starterCards.length} starter cards to user ${userId}`);
+    } catch (error) {
+        console.error('Error assigning starter cards:', error);
+        throw error;
+    }
+}
+
+// Get player's card inventory
+app.get('/api/inventory', authenticateToken, async (req: any, res) => {
+    try {
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests do not have persistent inventory' });
+        }
+        
+        const { data, error } = await supabase
+            .from('player_inventory')
+            .select('*')
+            .eq('player_id', req.user.id)
+            .order('card_index');
+            
+        if (error) {
+            console.error('Error fetching inventory:', error);
+            return res.status(500).json({ error: 'Failed to fetch inventory' });
+        }
+        
+        const totalCards = data?.reduce((sum, card) => sum + card.quantity, 0) || 0;
+        
+        res.json({
+            cards: data || [],
+            totalCards
+        });
+    } catch (error) {
+        console.error('Error fetching inventory:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Buy a card pack
+app.post('/api/cards/buy-pack', authenticateToken, async (req: any, res) => {
+    try {
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests cannot buy card packs' });
+        }
+        
+        const userId = req.user.id;
+        const packCost = 100;
+        
+        // Get current profile
+        const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('coins')
+            .eq('id', userId)
+            .single();
+            
+        if (profileError || !profile) {
+            return res.status(404).json({ error: 'Profile not found' });
+        }
+        
+        if (profile.coins < packCost) {
+            return res.status(400).json({ error: 'Insufficient coins' });
+        }
+        
+        // Determine card rarity based on probability
+        const random = Math.random() * 100;
+        let rarity: string;
+        let cardIndex: number;
+        
+        if (random < 0.5) {
+            rarity = 'Legendary';
+        } else if (random < 2) {
+            rarity = 'Ultra Rare';
+        } else if (random < 8) {
+            rarity = 'Epic';
+        } else if (random < 20) {
+            rarity = 'Rare';
+        } else if (random < 50) {
+            rarity = 'Uncommon';
+        } else {
+            rarity = 'Common';
+        }
+        
+        // Get cards of the selected rarity
+        const cardsOfRarity = [];
+        for (let i = 0; i < strains.length; i++) {
+            if (strains[i].Class === rarity) {
+                cardsOfRarity.push(i);
+            }
+        }
+        
+        if (cardsOfRarity.length === 0) {
+            // Fallback to common if no cards of selected rarity
+            for (let i = 0; i < strains.length; i++) {
+                if (strains[i].Class === 'Common') {
+                    cardsOfRarity.push(i);
+                }
+            }
+            rarity = 'Common';
+        }
+        
+        // Select random card from the rarity
+        cardIndex = cardsOfRarity[Math.floor(Math.random() * cardsOfRarity.length)];
+        
+        // Update player coins
+        const { error: coinsError } = await supabase
+            .from('profiles')
+            .update({ coins: profile.coins - packCost })
+            .eq('id', userId);
+            
+        if (coinsError) {
+            console.error('Error updating coins:', coinsError);
+            return res.status(500).json({ error: 'Failed to update coins' });
+        }
+        
+        // Add card to inventory
+        const { data: existingCard } = await supabase
+            .from('player_inventory')
+            .select('quantity')
+            .eq('player_id', userId)
+            .eq('card_index', cardIndex)
+            .single();
+            
+        if (existingCard) {
+            // Update existing card quantity
+            const { error: updateError } = await supabase
+                .from('player_inventory')
+                .update({ quantity: existingCard.quantity + 1 })
+                .eq('player_id', userId)
+                .eq('card_index', cardIndex);
+                
+            if (updateError) {
+                console.error('Error updating card quantity:', updateError);
+                return res.status(500).json({ error: 'Failed to update inventory' });
+            }
+        } else {
+            // Insert new card
+            const { error: insertError } = await supabase
+                .from('player_inventory')
+                .insert({
+                    player_id: userId,
+                    card_index: cardIndex,
+                    quantity: 1
+                });
+                
+            if (insertError) {
+                console.error('Error inserting new card:', insertError);
+                return res.status(500).json({ error: 'Failed to add card to inventory' });
+            }
+        }
+        
+        res.json({
+            card_index: cardIndex,
+            rarity: rarity,
+            remaining_coins: profile.coins - packCost
+        });
+        
+    } catch (error) {
+        console.error('Error buying card pack:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get player's decks
+app.get('/api/decks', authenticateToken, async (req: any, res) => {
+    try {
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests do not have persistent decks' });
+        }
+        
+        const { data, error } = await supabase
+            .from('player_decks')
+            .select('*')
+            .eq('player_id', req.user.id)
+            .order('created_at');
+            
+        if (error) {
+            console.error('Error fetching decks:', error);
+            return res.status(500).json({ error: 'Failed to fetch decks' });
+        }
+        
+        res.json(data || []);
+    } catch (error) {
+        console.error('Error fetching decks:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get player's active deck
+app.get('/api/decks/active', authenticateToken, async (req: any, res) => {
+    try {
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests do not have persistent decks' });
+        }
+        
+        const { data, error } = await supabase
+            .from('player_decks')
+            .select('*')
+            .eq('player_id', req.user.id)
+            .eq('is_active', true)
+            .single();
+            
+        if (error && error.code !== 'PGRST116') {
+            console.error('Error fetching active deck:', error);
+            return res.status(500).json({ error: 'Failed to fetch active deck' });
+        }
+        
+        res.json(data || null);
+    } catch (error) {
+        console.error('Error fetching active deck:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Create a new deck
+app.post('/api/decks', authenticateToken, async (req: any, res) => {
+    try {
+        if (req.user.isGuest) {
+            return res.status(403).json({ error: 'Guests cannot create persistent decks' });
+        }
+        
+        const { name, cards, isActive } = req.body;
+        const userId = req.user.id;
+        
+        if (!name || !cards || !Array.isArray(cards)) {
+            return res.status(400).json({ error: 'Name and cards array required' });
+        }
+        
+        if (cards.length !== 8) {
+            return res.status(400).json({ error: 'Deck must contain exactly 8 cards' });
+        }
+        
+        // Validate no duplicate cards
+        const cardIndexes = cards.map(c => c.cardIndex);
+        const uniqueIndexes = new Set(cardIndexes);
+        if (uniqueIndexes.size !== cardIndexes.length) {
+            return res.status(400).json({ error: 'Deck cannot contain duplicate cards' });
+        }
+        
+        // Validate player owns all cards
+        for (const card of cards) {
+            const { data: inventoryCard } = await supabase
+                .from('player_inventory')
+                .select('quantity')
+                .eq('player_id', userId)
+                .eq('card_index', card.cardIndex)
+                .single();
+                
+            if (!inventoryCard || inventoryCard.quantity === 0) {
+                return res.status(400).json({ error: `You don't own card ${card.cardIndex}` });
+            }
+        }
+        
+        // If setting as active, deactivate other decks first
+        if (isActive) {
+            await supabase
+                .from('player_decks')
+                .update({ is_active: false })
+                .eq('player_id', userId);
+        }
+        
+        const { data, error } = await supabase
+            .from('player_decks')
+            .insert({
+                player_id: userId,
+                name,
+                cards,
+                is_active: isActive || false
+            })
+            .select()
+            .single();
+            
+        if (error) {
+            console.error('Error creating deck:', error);
+            return res.status(500).json({ error: 'Failed to create deck' });
+        }
+        
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating deck:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
