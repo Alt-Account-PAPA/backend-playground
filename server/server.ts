@@ -302,7 +302,7 @@ app.get('/api/profile', authenticateToken, async (req: any, res) => {
         const totalGames = data.wins + data.losses;
         const winRate = totalGames > 0 ? Math.round((data.wins / totalGames) * 100) : 0;
         
-        res.json({
+        return res.json({
             ...data,
             totalGames,
             winRate,
@@ -310,7 +310,7 @@ app.get('/api/profile', authenticateToken, async (req: any, res) => {
         });
     } catch (error) {
         console.error('Error fetching profile:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -367,14 +367,14 @@ app.put('/api/profile', authenticateToken, async (req: any, res) => {
         const totalGames = updatedProfile.wins + updatedProfile.losses;
         const winRate = totalGames > 0 ? Math.round((updatedProfile.wins / totalGames) * 100) : 0;
         
-        res.json({
+        return res.json({
             ...updatedProfile,
             totalGames,
             winRate
         });
     } catch (error) {
         console.error('Error updating profile:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -429,10 +429,10 @@ app.post('/api/profile', authenticateToken, async (req: any, res) => {
         // Assign starter cards (2 uncommon + 6 common)
         await assignStarterCards(userId);
         
-        res.status(201).json(data);
+        return res.status(201).json(data);
     } catch (error) {
         console.error('Error creating profile:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -503,7 +503,7 @@ app.post('/api/game/result', authenticateToken, async (req: any, res) => {
                 xp_gained: xpGained
             });
         
-        res.json({
+        return res.json({
             xpGained,
             oldLevel,
             newLevel,
@@ -513,7 +513,7 @@ app.post('/api/game/result', authenticateToken, async (req: any, res) => {
         
     } catch (error) {
         console.error('Error processing game result:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -534,8 +534,8 @@ async function assignStarterCards(userId: string) {
         }
         
         // Randomly select 2 uncommon and 6 common cards
-        const selectedUncommon = [];
-        const selectedCommon = [];
+        const selectedUncommon: number[] = [];
+        const selectedCommon: number[] = [];
         
         // Select 2 random uncommon cards
         while (selectedUncommon.length < 2 && uncommonCards.length > 0) {
@@ -601,13 +601,13 @@ app.get('/api/inventory', authenticateToken, async (req: any, res) => {
         
         const totalCards = data?.reduce((sum, card) => sum + card.quantity, 0) || 0;
         
-        res.json({
+        return res.json({
             cards: data || [],
             totalCards
         });
     } catch (error) {
         console.error('Error fetching inventory:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -656,7 +656,7 @@ app.post('/api/cards/buy-pack', authenticateToken, async (req: any, res) => {
         }
         
         // Get cards of the selected rarity
-        const cardsOfRarity = [];
+        const cardsOfRarity: number[] = [];
         for (let i = 0; i < strains.length; i++) {
             if (strains[i].Class === rarity) {
                 cardsOfRarity.push(i);
@@ -723,7 +723,7 @@ app.post('/api/cards/buy-pack', authenticateToken, async (req: any, res) => {
             }
         }
         
-        res.json({
+        return res.json({
             card_index: cardIndex,
             rarity: rarity,
             remaining_coins: profile.coins - packCost
@@ -731,7 +731,7 @@ app.post('/api/cards/buy-pack', authenticateToken, async (req: any, res) => {
         
     } catch (error) {
         console.error('Error buying card pack:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -753,10 +753,10 @@ app.get('/api/decks', authenticateToken, async (req: any, res) => {
             return res.status(500).json({ error: 'Failed to fetch decks' });
         }
         
-        res.json(data || []);
+        return res.json(data || []);
     } catch (error) {
         console.error('Error fetching decks:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Failed to fetch decks' });
     }
 });
 
@@ -781,10 +781,10 @@ app.get('/api/decks/active', authenticateToken, async (req: any, res) => {
             return res.status(500).json({ error: 'Failed to fetch active deck' });
         }
         
-        res.json(data || null);
+        return res.json(data || null);
     } catch (error) {
         console.error('Error fetching active deck:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -851,10 +851,10 @@ app.post('/api/decks', authenticateToken, async (req: any, res) => {
             return res.status(500).json({ error: 'Failed to create deck' });
         }
         
-        res.status(201).json(data);
+        return res.status(201).json(data);
     } catch (error) {
         console.error('Error creating deck:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -882,10 +882,10 @@ app.get('/api/leaderboard', async (req, res) => {
                 : 0
         }));
         
-        res.json(leaderboard);
+        return res.json(leaderboard);
     } catch (error) {
         console.error('Error fetching leaderboard:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -1465,13 +1465,13 @@ io.on('connection', (socket: Socket) => {
             }
             
             // SECURITY: Validate attacker card index and stat
-            if (!attacker.index || attacker.index < 0 || attacker.index >= strains.length) {
+            if (attacker.index === undefined || attacker.index < 0 || attacker.index >= strains.length) {
                 console.log(`Invalid attacker card index: ${attacker.index}`);
                 return;
             }
             
             const strain = strains[attacker.index];
-            if (!strain || !strain[detail.stat] || typeof strain[detail.stat] !== 'number') {
+            if (!strain || !strain[detail.stat as keyof typeof strain] || typeof strain[detail.stat as keyof typeof strain] !== 'number') {
                 console.log(`Invalid stat ${detail.stat} for strain ${attacker.index}`);
                 return;
             }
@@ -1483,7 +1483,7 @@ io.on('connection', (socket: Socket) => {
             }
             
             // Process attack
-            const attackerStat = strain[detail.stat];
+            const attackerStat = strain[detail.stat as keyof typeof strain] as number;
             defender.hp -= attackerStat;
             const isKilled = defender.hp <= 0;
             if (isKilled) defender.hp = 0;
@@ -1526,7 +1526,7 @@ io.on('connection', (socket: Socket) => {
             
             // Handle death
             if (isKilled) {
-                delete game.players[opponentIndex].inPlayCards[detail.opponent];
+                game.players[opponentIndex].inPlayCards[detail.opponent] = undefined;
                 game.players[opponentIndex].deadCards.push(defender);
                 
                 // Check for game over
