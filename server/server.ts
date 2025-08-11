@@ -182,17 +182,42 @@ app.use(cors({
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    optionsSuccessStatus: 200 // For legacy browser support
+    optionsSuccessStatus: 200, // For legacy browser support
+    preflightContinue: false // Handle preflight requests immediately
 }));
+
+// Add request logging for debugging
+app.use((req, res, next) => {
+    console.log(`${req.method} ${req.path}`);
+    console.log('Origin:', req.headers.origin);
+    if (req.method === 'OPTIONS') {
+        console.log('CORS Preflight request detected');
+    }
+    next();
+});
 
 // Explicit OPTIONS handler for all routes to handle CORS preflight requests
 app.options('*', (req, res) => {
     console.log(`OPTIONS request for: ${req.path}`);
-    res.header('Access-Control-Allow-Origin', 'https://frontend-production-a9be.up.railway.app');
+    console.log('Request Origin:', req.headers.origin);
+    
+    // Set CORS headers explicitly
+    const origin = req.headers.origin;
+    if (origin === 'https://frontend-production-a9be.up.railway.app' || 
+        origin === 'https://www.straintradingcardgame.com' ||
+        origin === 'http://localhost:5173') {
+        res.header('Access-Control-Allow-Origin', origin);
+    } else {
+        res.header('Access-Control-Allow-Origin', 'https://frontend-production-a9be.up.railway.app');
+    }
+    
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
     res.header('Access-Control-Allow-Credentials', 'true');
-    res.sendStatus(200);
+    res.header('Access-Control-Max-Age', '86400'); // 24 hours
+    
+    console.log('Sending OPTIONS response with CORS headers');
+    res.status(200).end();
 });
 
 app.use(express.json()); // Add JSON parsing middleware
@@ -221,7 +246,10 @@ const staticPath = path.join(__dirname, '../build');
 app.use(express.static(staticPath));
 
 // Health check endpoint for Railway
-app.get('/', (req, res) => res.send('OK'));
+app.get('/', (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.send('OK - Backend Running with CORS');
+});
 
 // Debug endpoint to check server state
 app.get('/debug/state', (req, res) => {
