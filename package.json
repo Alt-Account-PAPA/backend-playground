@@ -1,10 +1,12 @@
 {
   "name": "strain-backend",
   "version": "0.0.1",
-  "type": "module",
+
   "scripts": {
-    "server": "npx tsx server/server.ts",
-    "start": "npx tsx server/server.ts"
+    "start": "npx tsx server/server.ts",
+    "build": "tsc",
+    "dev": "ts-node server/server.ts",
+    "test-server": "node test-server.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.53.0",
@@ -14,4 +16,5 @@
     "socket.io-client": "^4.8.1"
   }
 }
+
 
