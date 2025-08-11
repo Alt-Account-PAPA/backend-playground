@@ -172,28 +172,20 @@ function validateAttackInput(detail: any): boolean {
 
 const app = express();
 
-// Emergency CORS configuration - allow all origins temporarily
-app.use(cors({
-    origin: true, // Allow all origins
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    optionsSuccessStatus: 200
-}));
-
-// Simple request logging
+// AGGRESSIVE CORS FIX - Allow everything
 app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', '*');
+    res.header('Access-Control-Allow-Credentials', 'false'); // Must be false with wildcard origin
+    
+    if (req.method === 'OPTIONS') {
+        console.log(`OPTIONS ${req.path}`);
+        return res.status(200).end();
+    }
+    
     console.log(`${req.method} ${req.path}`);
     next();
-});
-
-// Simple OPTIONS handler
-app.options('*', (req, res) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.status(200).end();
 });
 
 app.use(express.json()); // Add JSON parsing middleware
@@ -223,8 +215,17 @@ app.use(express.static(staticPath));
 
 // Health check endpoint for Railway
 app.get('/', (req, res) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.send('OK');
+    res.send('OK - CORS Fixed');
+});
+
+// CORS test endpoint
+app.get('/test-cors', (req, res) => {
+    res.json({ message: 'CORS is working!', timestamp: new Date().toISOString() });
+});
+
+// Simple profile test endpoint (no auth)
+app.get('/api/test', (req, res) => {
+    res.json({ message: 'API is working!', cors: 'enabled' });
 });
 
 // Debug endpoint to check server state
