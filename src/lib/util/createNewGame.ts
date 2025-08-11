@@ -11,6 +11,7 @@ export type GamePlayer = {
 	xp?: number;
 	level?: number;
 	gameId?: string;
+	isGuest?: boolean;
 	cards: GameCard[];
 	deadCards: GameCard[];
 	inPlayCards: (GameCard | undefined)[];
@@ -30,8 +31,8 @@ export default function createNewGame(
 	player2.cards = createFixedDeck();
 	player1.deadCards = [];
 	player2.deadCards = [];
-	player1.inPlayCards = [, player1.cards.shift()!, player1.cards.shift()!, undefined];
-	player2.inPlayCards = [, player2.cards.shift()!, player2.cards.shift()!, undefined];
+	player1.inPlayCards = [undefined, player1.cards.shift()!, player1.cards.shift()!, undefined];
+	player2.inPlayCards = [undefined, player2.cards.shift()!, player2.cards.shift()!, undefined];
 	const state = {
 		id,
 		players: [player1, player2],
@@ -69,7 +70,7 @@ const evaluateHP = (index: number): number => {
 };
 
 function createFixedDeck() {
-	const shuffle = (array) => {
+	const shuffle = (array: GameCard[]) => {
 		for (let i = array.length - 1; i > 0; i--) {
 			const j = Math.floor(Math.random() * (i + 1));
 			[array[i], array[j]] = [array[j], array[i]];
