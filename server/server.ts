@@ -1553,10 +1553,9 @@ io.on('connection', (socket: Socket) => {
                         if (newCard) {
                             // Find first empty slot and place the card
                             for (let i = 0; i < 4; i++) {
-                                if (!game.players[opponentIndex]?.inPlayCards[i]) {
-                                    if (game.players[opponentIndex]) {
-                                        game.players[opponentIndex].inPlayCards[i] = newCard;
-                                    }
+                                const opponentPlayer = game.players[opponentIndex];
+                                if (opponentPlayer && !opponentPlayer.inPlayCards[i]) {
+                                    opponentPlayer.inPlayCards[i] = newCard;
                                     break;
                                 }
                             }
@@ -1612,11 +1611,12 @@ io.on('connection', (socket: Socket) => {
             return;
         }
         if (detail.type === 'drawCard') {
-            const newCard = game.players[playerIndex].cards.shift();
-            if (newCard) {
+            const currentPlayer = game.players[playerIndex];
+            const newCard = currentPlayer?.cards.shift();
+            if (newCard && currentPlayer) {
                 for (let i = 0; i < 4; i++) {
-                    if (!game.players[playerIndex].inPlayCards[i]) {
-                        game.players[playerIndex].inPlayCards[i] = newCard;
+                    if (!currentPlayer.inPlayCards[i]) {
+                        currentPlayer.inPlayCards[i] = newCard;
                         break;
                     }
                 }
