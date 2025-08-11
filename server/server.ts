@@ -521,8 +521,8 @@ app.post('/api/game/result', authenticateToken, async (req: any, res) => {
 async function assignStarterCards(userId: string) {
     try {
         // Get all common and uncommon cards from strains
-        const commonCards = [];
-        const uncommonCards = [];
+        const commonCards: number[] = [];
+        const uncommonCards: number[] = [];
         
         for (let i = 0; i < strains.length; i++) {
             const card = strains[i];
@@ -1457,8 +1457,8 @@ io.on('connection', (socket: Socket) => {
             const opponentIndex = 1 - playerIndex;
             
             // SECURITY: Validate cards exist
-            const attacker = game.players[playerIndex].inPlayCards[detail.attacker];
-            const defender = game.players[opponentIndex].inPlayCards[detail.opponent];
+            const attacker = game.players[playerIndex]?.inPlayCards[detail.attacker];
+            const defender = game.players[opponentIndex]?.inPlayCards[detail.opponent];
             if (!attacker || !defender) {
                 console.log(`Invalid cards for attack from ${socket.id}`);
                 return;
@@ -1501,7 +1501,7 @@ io.on('connection', (socket: Socket) => {
                 theirIndex: detail.opponent,
                 kill: isKilled,
                 attackerName: strain.Strain,
-                defenderName: strains[game.players[opponentIndex].inPlayCards[detail.opponent]?.index]?.Strain || 'Unknown',
+                defenderName: strains[defender.index]?.Strain || 'Unknown',
                 stat: detail.stat,
                 damage: attackerStat,
                 color: strain.Primary,
@@ -1513,7 +1513,7 @@ io.on('connection', (socket: Socket) => {
                 theirIndex: detail.attacker,
                 kill: isKilled,
                 attackerName: strain.Strain,
-                defenderName: strains[game.players[opponentIndex].inPlayCards[detail.opponent]?.index]?.Strain || 'Unknown',
+                defenderName: strains[defender.index]?.Strain || 'Unknown',
                 stat: detail.stat,
                 damage: attackerStat,
                 color: strain.Primary,
@@ -1549,12 +1549,14 @@ io.on('connection', (socket: Socket) => {
                     } else {
                         // Opponent has no cards in play but still has cards to draw
                         // Force opponent to draw a card if possible
-                        const newCard = game.players[opponentIndex].cards.shift();
+                        const newCard = game.players[opponentIndex]?.cards.shift();
                         if (newCard) {
                             // Find first empty slot and place the card
                             for (let i = 0; i < 4; i++) {
-                                if (!game.players[opponentIndex].inPlayCards[i]) {
-                                    game.players[opponentIndex].inPlayCards[i] = newCard;
+                                if (!game.players[opponentIndex]?.inPlayCards[i]) {
+                                    if (game.players[opponentIndex]) {
+                                        game.players[opponentIndex].inPlayCards[i] = newCard;
+                                    }
                                     break;
                                 }
                             }
