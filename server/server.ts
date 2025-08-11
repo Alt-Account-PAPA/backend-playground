@@ -171,7 +171,30 @@ function validateAttackInput(detail: any): boolean {
 }
 
 const app = express();
-app.use(cors());
+
+// Enhanced CORS configuration for Railway deployment with preflight support
+app.use(cors({
+    origin: [
+        'https://frontend-production-a9be.up.railway.app',
+        'https://www.straintradingcardgame.com',
+        'http://localhost:5173'
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    optionsSuccessStatus: 200 // For legacy browser support
+}));
+
+// Explicit OPTIONS handler for all routes to handle CORS preflight requests
+app.options('*', (req, res) => {
+    console.log(`OPTIONS request for: ${req.path}`);
+    res.header('Access-Control-Allow-Origin', 'https://frontend-production-a9be.up.railway.app');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.sendStatus(200);
+});
+
 app.use(express.json()); // Add JSON parsing middleware
 const httpServer = createServer(app);
 const io = new Server(httpServer, { 
@@ -255,6 +278,8 @@ function calculateXpGain(isWin: boolean, gameDuration?: number): number {
 
 // Get user profile
 app.get('/api/profile', authenticateToken, async (req: any, res) => {
+    console.log('GET /api/profile request received');
+    console.log('Headers:', req.headers);
     try {
         const user = req.user;
         
@@ -737,6 +762,8 @@ app.get('/api/decks', authenticateToken, async (req: any, res) => {
 
 // Get player's active deck
 app.get('/api/decks/active', authenticateToken, async (req: any, res) => {
+    console.log('GET /api/decks/active request received');
+    console.log('Headers:', req.headers);
     try {
         if (req.user.isGuest) {
             return res.status(403).json({ error: 'Guests do not have persistent decks' });
@@ -1644,6 +1671,8 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-    console.log('Matchmaking system initialized with conflict prevention');
+    console.log(`✅ Server listening on port ${PORT}`);
+    console.log('✅ Matchmaking system initialized with conflict prevention');
+    console.log('✅ CORS preflight handling enabled');
+    console.log('✅ Ready to handle requests from frontend');
 });
